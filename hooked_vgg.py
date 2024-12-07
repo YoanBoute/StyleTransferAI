@@ -3,6 +3,8 @@ import numpy as np
 import torchvision.models as models
 from torchvision.models import VGG19_Weights
 
+from image import Image
+
 class Hooked_VGG :
     """Retrieves a pretrained VGG19 model without classifier, and with facilitated hook registering to collect features of specific layers"""
     def __init__(self, hooked_layers_ixs = []) :
@@ -11,13 +13,84 @@ class Hooked_VGG :
         Args:
             hooked_layers_ixs (list|int, optional): Index or indices of the layers on which to collect features. Defaults to [].
         """
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self._device = "cuda" if torch.cuda.is_available() else "cpu"
         # Retrieve only the features extraction part of the model, as the classifier won't be used
-        self.vgg = models.vgg19(weights=VGG19_Weights.IMAGENET1K_V1).features.to(self.device)
-        self.conv_features = {}
-        self.hooks = {}
+        self._vgg = models.vgg19(weights=VGG19_Weights.IMAGENET1K_V1).features.to(self.device)
+        self.trainable = False
+        self._conv_features = {}
+        self._hooks = {}
 
         self.add_hooks(hooked_layers_ixs)
+
+
+    @property
+    def vgg(self) :
+        return self._vgg
+    
+    @vgg.setter
+    def vgg(self, new_value) :
+        raise AttributeError("Direct modification of the neural network is not authorized")
+    
+    @vgg.deleter
+    def vgg(self) :
+        raise AttributeError("Deletion of the neural network is not authorized")
+    
+
+    @property
+    def conv_features(self) :
+        return self._conv_features
+    
+    @conv_features.setter
+    def conv_features(self, new_value) :
+        raise AttributeError("Direct modification of this attribute is not authorized")
+    
+    @conv_features.deleter
+    def conv_features(self) :
+        raise AttributeError("Deletion of this attribute is not authorized")
+    
+
+    @property
+    def hooks(self) :
+        return self._hooks
+    
+    @hooks.setter
+    def hooks(self, new_value) :
+        raise AttributeError("Direct modification of this attribute is not authorized")
+    
+    @hooks.deleter
+    def hooks(self) :
+        raise AttributeError("Deletion of this attribute is not authorized")
+    
+    
+    @property
+    def device(self) :
+        return self._device
+
+    @device.setter
+    def device(self, new_value) :
+        raise AttributeError("Direct modification of the device is not authorized, please use the method to(device).")
+    
+    @device.deleter
+    def device(self) :
+        raise AttributeError("Deletion of the device attribute is not authorized.")
+    
+
+    @property
+    def trainable(self) :
+        return self._trainable
+    
+    @trainable.setter
+    def trainable(self, new_value) :
+        if new_value not in (True, False, 0, 1) :
+            raise AttributeError("Please provide a boolean value")
+        
+        self._trainable = bool(new_value)
+        for param in self.vgg.parameters() :
+            param.requires_grad = self.trainable
+    
+    @trainable.deleter
+    def trainable(self) :
+        raise AttributeError("Deletion of the 'trainable' attribute is not authorized.")
 
 
     def to(self, device) :
@@ -39,7 +112,7 @@ class Hooked_VGG :
             print(f"Unable to switch the model to this device ({e})")
             return self
 
-        self.device = device  
+        self._device = device  
 
         return self
 
@@ -51,7 +124,7 @@ class Hooked_VGG :
             layer_ix (int): id of the layer to put a hook on
         """
         def hook_function(module, input, output) :
-            self.conv_features[layer_ix] = output
+            self._conv_features[layer_ix] = output
         return hook_function
     
 
@@ -68,7 +141,7 @@ class Hooked_VGG :
             if self.hooks.get(layer_ix) is not None :
                 continue
 
-            self.hooks[layer_ix] = self.vgg[layer_ix].register_forward_hook(self._define_hook_fn(layer_ix))
+            self._hooks[layer_ix] = self.vgg[layer_ix].register_forward_hook(self._define_hook_fn(layer_ix))
 
 
     def remove_hooks(self, layer_ixs) :
@@ -85,10 +158,10 @@ class Hooked_VGG :
                 continue
 
             self.hooks[layer_ix].remove()
-            self.hooks.pop(layer_ix)
+            self._hooks.pop(layer_ix)
 
 
-    def get_features(self, img) :
+    def get_features(self, img : Image) :
         """Initiate a forward pass on the Hooked VGG with an image to collect this image's specific features.
 
         Args:
@@ -97,9 +170,9 @@ class Hooked_VGG :
         Returns:
             dict: The features of the layers on which there is a hook, indexed by layer index
         """
-        self.conv_features = {}
-        self.vgg.to(self.device).forward(img)
+        self._conv_features = {}
+        self.vgg.to(self.device).forward(img.to_tensor())
         out_features = self.conv_features
-        self.conv_features = {}
+        self._conv_features = {}
 
         return out_features
