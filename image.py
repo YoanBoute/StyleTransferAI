@@ -32,22 +32,28 @@ class Image :
                 self._rgb_img[:,:,2] = self.original_img      
             else : 
                 self._rgb_img = self.original_img
+            
+            self.trainable = False # An image coming from a file usually has no reason to be modified by a training
         else :
             try :
                 l = len(shape)
             except Exception as e :
-                raise ValueError("The shape must be a 2D list or tuple") from None
+                raise ValueError("The shape must be a 2D or 3D list or tuple") from None
             
-            if l == 2 :
-                shape = (*shape, 3) # Add the 3 channels to the image
-            else :
-                raise ValueError("Please provide a valid 2D shape for the image")
+            match l :
+                case 2 :
+                    shape = (*shape, 3) # Add the 3 channels to the image
+                case 3 :
+                    if shape[-1] != 3 :
+                        raise ValueError("Invalid shape, the provided shape must have 3 channels (in the last dimension)")
+                case _ :
+                    raise ValueError("Please provide a valid 2D or 3D shape for the image")
             
             self._original_img = (np.random.random(shape) * 255).astype(int)
             self._rgb_img = self.original_img
+            self.trainable = True # A white noise image is considered trainable by default
 
         self._device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.trainable = True
         self._shape = self.rgb_img.shape
     
 

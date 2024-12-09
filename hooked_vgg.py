@@ -16,6 +16,7 @@ class Hooked_VGG :
         self._device = "cuda" if torch.cuda.is_available() else "cpu"
         # Retrieve only the features extraction part of the model, as the classifier won't be used
         self._vgg = models.vgg19(weights=VGG19_Weights.IMAGENET1K_V1).features.to(self.device)
+        # self._device = self.vgg[0].device
         self.trainable = False
         self._conv_features = {}
         self._hooks = {}
@@ -112,7 +113,7 @@ class Hooked_VGG :
             print(f"Unable to switch the model to this device ({e})")
             return self
 
-        self._device = device  
+        self._device = self.vgg.device  
 
         return self
 
@@ -161,17 +162,17 @@ class Hooked_VGG :
             self._hooks.pop(layer_ix)
 
 
-    def get_features(self, img : Image) :
+    def get_features(self, img_tensor : torch.Tensor) :
         """Initiate a forward pass on the Hooked VGG with an image to collect this image's specific features.
 
         Args:
-            img (torch.Tensor): 4D Tensor of the image, with the shape (1, 3, height, width)
+            img_tensor (torch.Tensor): 4D Tensor of the image, with the shape (1, 3, height, width)
 
         Returns:
             dict: The features of the layers on which there is a hook, indexed by layer index
         """
         self._conv_features = {}
-        self.vgg.to(self.device).forward(img.to_tensor())
+        self.vgg.to(self.device).forward(img_tensor)
         out_features = self.conv_features
         self._conv_features = {}
 
