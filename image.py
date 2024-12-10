@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 
 class Image :
     """Class to encapsulate generic behavior of an image."""
-    def __init__(self, img_path : Path = None, shape = None) :
+    def __init__(self, img : Path | str | torch.Tensor = None, *, white_noise_shape : tuple = None, normalize_means : list = [0.485, 0.456, 0.406], normalize_stds : list = [0.229, 0.224, 0.225], is_normalized = None) :
         """Initialize the Image by collecting it from the indicated path
 
         Args:
@@ -16,45 +16,89 @@ class Image :
             RuntimeError: If the image could not be loaded
             ValueError: If the provided shape for a white noise image is invalid, or if no arguments are provided
         """
-        if img_path is None and shape is None :
+        if img is None and white_noise_shape is None :
             raise ValueError("Please provide a file path or the shape of the image to generate")
 
-        if img_path is not None :
-            self._original_img = cv.imread(img_path)
-            if self.original_img is None :
-                raise RuntimeError(f'Unable to read image {img_path}')
-            
-            # Convert single channel image to 3 channels if necessary
-            if len(self.original_img.shape) == 2 : 
-                self._rgb_img = np.zeros((*self.original_img.shape, 3))
-                self._rgb_img[:,:,0] = self.original_img      
-                self._rgb_img[:,:,1] = self.original_img      
-                self._rgb_img[:,:,2] = self.original_img      
-            else : 
+        if img is not None :
+            if isinstance(img, str) :
+                img = Path(img) # Transform the string to a Path to ensure compatibility with all OS
+
+            if isinstance(img, Path) : 
+                self._original_img = cv.imread(img)
+                if self.original_img is None :
+                    raise RuntimeError(f'Unable to read image {img}')
+                
+                # Convert single channel image to 3 channels if necessary
+                if len(self.original_img.shape) == 2 : 
+                    self._rgb_img = np.zeros((*self.original_img.shape, 3))
+                    self._rgb_img[:,:,0] = self.original_img      
+                    self._rgb_img[:,:,1] = self.original_img      
+                    self._rgb_img[:,:,2] = self.original_img      
+                else : 
+                    self._rgb_img = self.original_img
+                
+                self.trainable = False # An image coming from a file usually has no reason to be modified by a training
+            elif isinstance(img, torch.Tensor) :
+                if len(img.shape) != 4 or img.shape[1] != 3 :
+                    raise ValueError("Please provide a 4D Tensor in the format (batch, channels, height, width)")
+                
+                img_height = img.shape[2]
+                img_width = img.shape[3]
+
+                self._original_img = img.cpu().clone().detach().reshape((img_height, img_width, 3)).numpy()
                 self._rgb_img = self.original_img
-            
-            self.trainable = False # An image coming from a file usually has no reason to be modified by a training
-        else :
+
+                self.trainable = False # An image coming from a Tensor is usually already trained, and has no reason to be modified
+            else :
+                raise ValueError("The provided image should be a path to a file or a 4D Tensor. If you wish to create a random image, please use the keyword white_noise_shape.")
+        
+        else : # white_noise_shape provided
             try :
-                l = len(shape)
+                l = len(white_noise_shape)
             except Exception as e :
                 raise ValueError("The shape must be a 2D or 3D list or tuple") from None
             
             match l :
                 case 2 :
-                    shape = (*shape, 3) # Add the 3 channels to the image
+                    white_noise_shape = (*white_noise_shape, 3) # Add the 3 channels to the image
                 case 3 :
-                    if shape[-1] != 3 :
+                    if white_noise_shape[-1] != 3 :
                         raise ValueError("Invalid shape, the provided shape must have 3 channels (in the last dimension)")
                 case _ :
                     raise ValueError("Please provide a valid 2D or 3D shape for the image")
             
-            self._original_img = (np.random.random(shape) * 255).astype(int)
+            self._original_img = (np.random.random(white_noise_shape))
             self._rgb_img = self.original_img
             self.trainable = True # A white noise image is considered trainable by default
 
+        # Make sure the 3 channels image is always in Float format (values between 0 and 1)
+        if np.issubdtype(self.original_img.dtype, np.integer) :
+            self._rgb_img = self.original_img / 255.0
+
+        if not (isinstance(normalize_means, list) or isinstance(normalize_means, np.ndarray) or isinstance(normalize_means, torch.Tensor)) or len(normalize_means) != 3 :
+            raise ValueError("normalize_means should be a 3 elements list providing the means with which to normalize respectivley red, green and blue channels in the image.")
+
+        if not (isinstance(normalize_stds, list) or isinstance(normalize_stds, np.ndarray) or isinstance(normalize_stds, torch.Tensor)) or len(normalize_stds) != 3 :
+            raise ValueError("normalize_stds should be a 3 elements list providing the means with which to normalize respectivley red, green and blue channels in the image.")  
+
+        self._normalize_means = np.array(normalize_means).astype(float).reshape(1, 1, 3)
+        self._normalize_stds = np.array(normalize_stds).astype(float).reshape(1, 1, 3)
+        
+        if is_normalized is None:
+            if isinstance(img, Path) :
+                self._is_normalized = False # An image taken from a file is considered unnormalized by default
+            else : # if img is a Tensor
+                self._is_normalized = True # An image coming from a Tensor is considered normalized by default
+        else :
+            self._is_normalized = is_normalized
+
+        self._compute_normalized_rgb()
+        
+        self._normalize = True
         self._device = "cuda" if torch.cuda.is_available() else "cpu"
         self._shape = self.rgb_img.shape
+        self._height = self.shape[0]
+        self._width = self.shape[1]
     
 
     @property
@@ -84,6 +128,66 @@ class Image :
     
 
     @property
+    def normalized_rgb(self) :
+        return self._normalized_rgb
+    
+    @normalized_rgb.setter
+    def normalized_rgb(self, new_value) :
+        raise AttributeError("Direct modification of the image data is not authorized")
+    
+    @normalized_rgb.deleter
+    def normalized_rgb(self) :
+        raise AttributeError("Deletion of image data is not authorized")
+
+
+    @property
+    def normalize_means(self) :
+        return self._normalize_means
+    
+    @normalize_means.setter
+    def normalize_means(self, new_value) :
+        if not (isinstance(new_value, list) or isinstance(new_value, np.ndarray) or isinstance(new_value, torch.Tensor)) or len(new_value) != 3 :
+            raise ValueError("normalize_means should be a 3 elements list providing the means with which to normalize respectivley red, green and blue channels in the image.")
+        self._normalize_means = torch.Tensor(new_value).view(1,3,1,1)
+        self._compute_normalized_rgb()
+    
+    @normalize_means.deleter
+    def normalize_means(self) :
+        raise AttributeError("Deletion of image data is not authorized")
+    
+
+    @property
+    def normalize_stds(self) :
+        return self._normalize_stds
+    
+    @normalize_stds.setter
+    def normalize_stds(self, new_value) :
+        if not (isinstance(new_value, list) or isinstance(new_value, np.ndarray) or isinstance(new_value, torch.Tensor)) or len(new_value) != 3 :
+            raise ValueError("normalize_stds should be a 3 elements list providing the means with which to normalize respectivley red, green and blue channels in the image.")
+        self._normalize_stds = torch.Tensor(new_value).view(1,3,1,1)
+        self._compute_normalized_rgb()
+    
+    @normalize_stds.deleter
+    def normalize_stds(self) :
+        raise AttributeError("Deletion of image data is not authorized")
+
+
+    @property
+    def normalize(self) :
+        return self._normalize
+    
+    @normalize.setter
+    def normalize(self, new_value) :
+        if new_value not in (True, False, 0, 1) :
+            raise AttributeError("Please provide a boolean value")
+        self._normalize = bool(new_value)
+
+    @normalize.deleter
+    def normalize(self) :
+        raise AttributeError("Deletion of the 'normalize' error is not authorized")
+
+
+    @property
     def shape(self) :
         return self._shape
     
@@ -93,6 +197,32 @@ class Image :
     
     @shape.deleter
     def shape(self) :
+        raise AttributeError("Deletion of image data is not authorized")
+    
+
+    @property
+    def height(self) :
+        return self._height
+    
+    @height.setter
+    def height(self, new_value) :
+        raise AttributeError("Direct modification of the image data is not authorized")
+    
+    @height.deleter
+    def height(self) :
+        raise AttributeError("Deletion of image data is not authorized")
+    
+
+    @property
+    def width(self) :
+        return self._width
+    
+    @width.setter
+    def width(self, new_value) :
+        raise AttributeError("Direct modification of the image data is not authorized")
+    
+    @width.deleter
+    def width(self) :
         raise AttributeError("Deletion of image data is not authorized")
     
 
@@ -125,6 +255,15 @@ class Image :
         raise AttributeError("Deletion of the 'trainable' attribute is not authorized.")
     
 
+    def _compute_normalized_rgb(self) :
+        if not self._is_normalized :
+            self._normalized_rgb = (self.rgb_img - self.normalize_means) / self.normalize_stds
+        else :
+            self._normalized_rgb = self._rgb_img
+            self._rgb_img = self.normalized_rgb * self.normalize_stds + self.normalize_means
+            self._original_img = self.rgb_img
+
+
     def to(self, device) :
         """Switch the image to the specified device (For example, "cpu" or "cuda"). Useful mainly when working on Tensors.
         If switching to this device is not possible, the Image will remain as before
@@ -156,9 +295,12 @@ class Image :
         Returns:
             Tensor: The Tensor corresponding to the image, with shape (1, 3, height, width)
         """
-        return torch.Tensor(self.rgb_img).reshape((1,3,self.rgb_img.shape[0], self.rgb_img.shape[1])).to(self.device).requires_grad_(self.trainable)
-    
-    
+        if self.normalize :
+            return torch.Tensor(self.normalized_rgb).reshape((1,3,self.height, self.width)).to(self.device).requires_grad_(self.trainable)
+        else :
+            return torch.Tensor(self.rgb_img).reshape((1,3,self.height, self.width)).to(self.device).requires_grad_(self.trainable)
+        
+
     def show(self) :
         """Plot the image to visualize it"""
         plt.imshow(self.rgb_img)
