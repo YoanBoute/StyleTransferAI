@@ -2,6 +2,7 @@ import torch
 import numpy as np
 import torchvision.models as models
 from torchvision.models import VGG19_Weights
+from copy import copy
 
 from image import Image
 
@@ -52,7 +53,7 @@ class Hooked_VGG :
 
     @property
     def hooks(self) :
-        return self._hooks
+        return self._hooks.copy() # Return a copy to prevent direct modification of the list
     
     @hooks.setter
     def hooks(self, new_value) :
@@ -160,6 +161,13 @@ class Hooked_VGG :
 
             self.hooks[layer_ix].remove()
             self._hooks.pop(layer_ix)
+
+    
+    def remove_all_hooks(self) :
+        """Clear the model from all its active hooks."""
+        for key, hook in self.hooks.items() :
+            hook.remove()
+            self._hooks.pop(key)
 
 
     def get_features(self, img_tensor : torch.Tensor) :
