@@ -7,6 +7,7 @@ from copy import copy, deepcopy
 
 from image import Image
 from hooked_vgg import Hooked_VGG
+from custom_trainer import CustomTrainer
 
 class StyleTransferModel(L.LightningModule) :
     def __init__(self, content_img : Image, style_img : Image, content_feat_layers : list, style_feat_layers : list, vgg_model : Hooked_VGG = None, *args, **kwargs):
@@ -23,23 +24,21 @@ class StyleTransferModel(L.LightningModule) :
         self._train_img_history = []
         self._train_tensor = torch.nn.Parameter(train_img.to_tensor())
 
+        self._trained_img = None
+
     
     def ST_loss(self, content_train_features, style_train_features) :
         """Temporary function"""
         loss = torch.nn.MSELoss()
-        return loss(self.content_features[0], content_train_features[0])
+        return loss(list(self.content_features.values())[0], list(content_train_features.values())[0])
 
     def forward(self, x : torch.Tensor) :
         return self.vgg_model.get_features(x)
     
-    def training_step(self, batch, batch_idx) :
-        if batch is None :
-            batch = torch.zeros_like(self._train_tensor)
-            
+    def training_step(self, batch, batch_idx) :            
         if not self.trainer :
             print("No trainer")
             
-        self._train_img_history.append(Image(self._train_tensor.clone().detach()))
         content_train_feat = self._compute_features(self._train_tensor, 'content')
         style_train_feat   = self._compute_features(self._train_tensor, 'style')
 
@@ -52,6 +51,14 @@ class StyleTransferModel(L.LightningModule) :
     def configure_optimizers(self) :
         return torch.optim.Adam([self._train_tensor], lr=0.1)
     
+    def on_train_end(self):
+        self._trained_img = Image(self.train_tensor)
+        return super().on_train_end()
+    
+    def on_train_epoch_end(self):
+        self._train_img_history.append(Image(self._train_tensor.clone().detach()))
+        return super().on_train_epoch_end()
+    
     def _compute_features(self, x : torch.Tensor, feat_type : str) :
         if feat_type not in ['content', 'style'] :
             raise ValueError("feat_type should be either 'content' or 'style'")
@@ -61,6 +68,20 @@ class StyleTransferModel(L.LightningModule) :
         self.vgg_model.add_hooks(hooks)
         
         return self.forward(x)
+    
+    def train(self, *, trainer : CustomTrainer = None, from_checkpoint = False, **kwargs) :
+        if not from_checkpoint :
+            # Reset the train Tensor and the training history
+            train_img = Image(white_noise_shape = self.content_img.shape)
+            self._train_img_history = []
+            self._train_tensor = torch.nn.Parameter(train_img.to_tensor())
+        
+        if trainer is None :
+            trainer = CustomTrainer(**kwargs)
+        
+        trainer.fit(self)
+
+        self.trained_img.show()
     
     
     @property
@@ -189,4 +210,17 @@ class StyleTransferModel(L.LightningModule) :
     
     @train_img_history.deleter
     def train_img_history(self) :
+        raise AttributeError("Deletion of this attribute is not authorized")
+    
+
+    @property
+    def trained_img(self) :
+        return self._trained_img
+    
+    @trained_img.setter
+    def trained_img(self, new_value) :
+        raise AttributeError("Direct modification of this attribute is not authorized")
+    
+    @trained_img.deleter
+    def trained_img(self) :
         raise AttributeError("Deletion of this attribute is not authorized")
