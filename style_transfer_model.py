@@ -1,9 +1,11 @@
 import torch
 import lightning as L
+from lightning.pytorch.loggers import TensorBoardLogger
 from torch.utils.data import DataLoader
 import numpy as np
 from pathlib import Path
 from copy import copy, deepcopy
+import os
 
 from image import Image
 from hooked_vgg import Hooked_VGG
@@ -70,16 +72,40 @@ class StyleTransferModel(L.LightningModule) :
         return self.forward(x)
     
     def train(self, *, trainer : CustomTrainer = None, from_checkpoint = False, **kwargs) :
+        if kwargs.get('max_epochs') is None :
+            raise ValueError("Please provide a maximum number of epochs to avoid an endless training process")
+
         if not from_checkpoint :
             # Reset the train Tensor and the training history
             train_img = Image(white_noise_shape = self.content_img.shape)
             self._train_img_history = []
             self._train_tensor = torch.nn.Parameter(train_img.to_tensor())
-        
-        if trainer is None :
-            trainer = CustomTrainer(**kwargs)
-        
-        trainer.fit(self)
+            ckpt_path = None
+            logger = None
+            total_epochs = None
+        else :
+            if kwargs['max_epochs'] - self.current_epoch <= 0 :
+                print("The provided max epoch number was already reached in a previous checkpoint. No training is necessary")
+                return
+            
+            logger = TensorBoardLogger(save_dir=Path(self.trainer.default_root_dir), version=self.logger.version)
+            ckpt_dir = Path(self.trainer.log_dir) / 'checkpoints'
+            if not ckpt_dir.exists() :
+                print("Warning : Unable to find the checkpoint path of the model, a new version will be created")
+            else :
+                ckpt_files_list = [f for f in ckpt_dir.glob('*.ckpt')]
+
+                # If many ckpt files are found in the folder, keep the latest as basis
+                if len(ckpt_files_list) > 1 :
+                    ckpt_path = max(ckpt_files_list, key=os.path.getctime) 
+                else :
+                    ckpt_path = ckpt_files_list[0]
+            total_epochs = kwargs['max_epochs'] - self.current_epoch # Compute the number of actual epochs of the training to have a coherent progress bar
+
+        if self.__dict__.get('trainer') is None :
+            self.trainer = CustomTrainer(logger=logger, total_epochs=total_epochs, **kwargs)
+
+        self.trainer.fit(self, ckpt_path=ckpt_path)
 
         self.trained_img.show()
     
