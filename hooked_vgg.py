@@ -109,12 +109,12 @@ class Hooked_VGG :
             return self
         
         try :
-            self.vgg.to(self.device)  
+            self.vgg.to(device)  
         except Exception as e :
             print(f"Unable to switch the model to this device ({e})")
             return self
 
-        self._device = self.vgg.device  
+        self._device = next(self.vgg.parameters()).device  
 
         return self
 

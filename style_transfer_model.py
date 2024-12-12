@@ -12,7 +12,17 @@ from hooked_vgg import Hooked_VGG
 from custom_trainer import CustomTrainer
 
 class StyleTransferModel(L.LightningModule) :
+    """Lightning Module to encapsulate the training process of creating an image with the content from one image and the style of another"""
     def __init__(self, content_img : Image, style_img : Image, content_feat_layers : list, style_feat_layers : list, vgg_model : Hooked_VGG = None, *args, **kwargs):
+        """Initialize the model
+
+        Args:
+            content_img (Image): Image used for the content
+            style_img (Image): Image from which to extract the general style
+            content_feat_layers (list): List of indices of the convolutional layers from which to extract features for the content
+            style_feat_layers (list): List of indices of the convolutional layers from which to extract features for the style
+            vgg_model (Hooked_VGG, optional): Model to use for feature extraction. Defaults to None.
+        """
         super().__init__(*args, **kwargs)
         self.vgg_model = vgg_model if vgg_model is not None else Hooked_VGG()
 
@@ -21,8 +31,12 @@ class StyleTransferModel(L.LightningModule) :
         
         self.content_img  = content_img
         self.style_img    = style_img
+        if self.content_img.device != self.used_device or self.style_img.device != self.used_device :
+            print("Warning : Different devices were detected. Using the device of the model as reference...")
+            self.content_img.to(self.used_device)
+            self.style_img.to(self.used_device)
 
-        train_img = Image(white_noise_shape = self.content_img.shape)
+        train_img = Image(white_noise_shape = self.content_img.shape).to(self.used_device)
         self._train_img_history = []
         self._train_tensor = torch.nn.Parameter(train_img.to_tensor())
 
@@ -37,10 +51,7 @@ class StyleTransferModel(L.LightningModule) :
     def forward(self, x : torch.Tensor) :
         return self.vgg_model.get_features(x)
     
-    def training_step(self, batch, batch_idx) :            
-        if not self.trainer :
-            print("No trainer")
-            
+    def training_step(self, batch, batch_idx) :             
         content_train_feat = self._compute_features(self._train_tensor, 'content')
         style_train_feat   = self._compute_features(self._train_tensor, 'style')
 
@@ -54,14 +65,28 @@ class StyleTransferModel(L.LightningModule) :
         return torch.optim.Adam([self._train_tensor], lr=0.1)
     
     def on_train_end(self):
+        # When the training is complete, retrieve the Image corresponding to the trained tensor
         self._trained_img = Image(self.train_tensor)
         return super().on_train_end()
     
     def on_train_epoch_end(self):
+        # After each epoch, save the state of the trained image in history
         self._train_img_history.append(Image(self._train_tensor.clone().detach()))
         return super().on_train_epoch_end()
     
     def _compute_features(self, x : torch.Tensor, feat_type : str) :
+        """Compute the features of an image, using specific layers for content extraction and for style extraction.
+
+        Args:
+            x (torch.Tensor): Image tensor
+            feat_type (str): Either 'content' or 'style'
+
+        Raises:
+            ValueError: If the feat_type is invalid
+
+        Returns:
+            dict: The specific features for content or style
+        """
         if feat_type not in ['content', 'style'] :
             raise ValueError("feat_type should be either 'content' or 'style'")
         
@@ -72,12 +97,23 @@ class StyleTransferModel(L.LightningModule) :
         return self.forward(x)
     
     def train(self, *, trainer : CustomTrainer = None, from_checkpoint = False, **kwargs) :
+        """Train the model using the specified content and style image. 
+        If no Trainer is provided, a custom trainer parameterized to display correctly the progres bar will be used.
+        Use keyword arguments to change specific parameters of the Trainer, in particular max_epochs
+
+        Args:
+            trainer (CustomTrainer, optional): Trainer to use for the training. Defaults to None.
+            from_checkpoint (bool, optional): Whether to restart from the current trained state, or to erase all progress before training. Defaults to False.
+
+        Raises:
+            ValueError: If no limit for the Trainer is provided
+        """
         if kwargs.get('max_epochs') is None :
             raise ValueError("Please provide a maximum number of epochs to avoid an endless training process")
 
         if not from_checkpoint :
             # Reset the train Tensor and the training history
-            train_img = Image(white_noise_shape = self.content_img.shape)
+            train_img = Image(white_noise_shape = self.content_img.shape).to(self.used_device)
             self._train_img_history = []
             self._train_tensor = torch.nn.Parameter(train_img.to_tensor())
             ckpt_path = None
@@ -101,14 +137,53 @@ class StyleTransferModel(L.LightningModule) :
                 else :
                     ckpt_path = ckpt_files_list[0]
             total_epochs = kwargs['max_epochs'] - self.current_epoch # Compute the number of actual epochs of the training to have a coherent progress bar
-
-        if self.__dict__.get('trainer') is None :
-            self.trainer = CustomTrainer(logger=logger, total_epochs=total_epochs, **kwargs)
-
+        
+        self.trainer = CustomTrainer(logger=logger, total_epochs=total_epochs, device=self.used_device, **kwargs)
         self.trainer.fit(self, ckpt_path=ckpt_path)
 
         self.trained_img.show()
     
+    def to(self, device) :
+        """Switch the model to the indicated computation device ("cpu" or "cuda", for example). 
+        If switching is not possible, the model will remain as before.
+
+        Args:
+            device (str): Name of the device to switch the model on
+
+        Returns:
+            StyleTransferModel: The updated model
+        """
+
+        device = str(device)
+        old_device = self.used_device
+
+        if str(device) == old_device :
+            return self
+
+        # If any of the components fail to be transferred to the device, all transfers are cancelled (There is no need for an error message here as it is already printed in Image and Hooked_VGG methods)
+        self.content_img.to(device)
+        if str(self.content_img.device) == old_device :
+            return self
+        
+        self.style_img.to(device)
+        if str(self.style_img.device) == old_device :
+            self.content_img.to(old_device)
+            return self
+        
+        self.vgg_model.to(device)
+        if str(self.vgg_model.device) == old_device :
+            self.content_img.to(old_device)
+            self.style_img.to(old_device)
+            return self
+        
+        self._train_tensor = torch.nn.Parameter(self._train_tensor.to(device=device))
+        for key in self.content_features.keys() :
+            self._content_features[key] = self._content_features[key].to(device)
+        for key in self.style_features.keys() :
+            self._style_features[key] = self._style_features[key].to(device)
+
+        self._used_device = device
+
     
     @property
     def content_img(self) :
@@ -119,6 +194,8 @@ class StyleTransferModel(L.LightningModule) :
         if not isinstance(new_value, Image) :
             raise ValueError("content_img should be an Image")
         self._content_img = new_value
+        if self.content_img.device != self.used_device :
+            self.content_img.to(self.used_device)
         self._content_features = self._compute_features(self.content_img.to_tensor(), 'content')
     
     @content_img.deleter
@@ -135,6 +212,8 @@ class StyleTransferModel(L.LightningModule) :
         if not isinstance(new_value, Image) :
             raise ValueError("style_img should be an Image")
         self._style_img = new_value
+        if self.style_img.device != self.used_device :
+            self.style_img.to(self.used_device)
         self._style_features = self._compute_features(self.style_img.to_tensor(), 'content')
     
     @style_img.deleter
@@ -151,6 +230,17 @@ class StyleTransferModel(L.LightningModule) :
         if not isinstance(new_value, Hooked_VGG) :
             raise ValueError("vgg_model should be a Hooked_VGG")
         self._vgg_model = new_value
+        
+        # If no device is defined (during initialization), the device of the model is used as reference
+        if self.__dict__.get('used_device') is None :
+            self._used_device = str(self.vgg_model.device)
+        elif self.vgg_model.device != self.used_device :
+            self.vgg_model.to(self.used_device)
+
+        if self.__dict__.get('content_img') is not None :
+            self._content_features = self._compute_features(self.content_img.to_tensor(), 'content')
+        if self.__dict__.get('style_img') is not None :
+            self._style_features = self._compute_features(self.style_img.to_tensor(), 'style')
     
     @vgg_model.deleter
     def vgg_model(self) :
@@ -249,4 +339,17 @@ class StyleTransferModel(L.LightningModule) :
     
     @trained_img.deleter
     def trained_img(self) :
+        raise AttributeError("Deletion of this attribute is not authorized")
+    
+
+    @property
+    def used_device(self) :
+        return self._used_device
+    
+    @used_device.setter
+    def used_device(self, new_value) :
+        raise AttributeError("Direct modification of the device is not authorized. Please use the to(device) method.")
+    
+    @used_device.deleter
+    def used_device(self) :
         raise AttributeError("Deletion of this attribute is not authorized")
