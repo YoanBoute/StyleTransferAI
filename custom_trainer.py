@@ -18,10 +18,12 @@ class EpochProgressBar(Callback):
     def on_train_epoch_end(self, trainer, pl_module):
         if self.epoch_bar is not None:
             self.epoch_bar.update(1)
-            
-        loss = trainer.callback_metrics.get('General loss') 
+        
+        logged_metrics_str = {}
         for logged_metric, value in trainer.callback_metrics.items() :
-            self.epoch_bar.set_postfix({f"{logged_metric.capitalize().replace('_', ' ')}": value.item()})
+            logged_metrics_str[logged_metric.capitalize().replace('_', ' ')] = value.item()
+
+        self.epoch_bar.set_postfix(logged_metrics_str)
 
     def on_train_end(self, trainer, pl_module):
         if self.epoch_bar is not None:
@@ -69,6 +71,8 @@ class CustomTrainer(L.Trainer) :
             default_root_dir = Path('D:/StyleTransferAI/StyleTransferAI/trainings')
         
         if device is not None :
+            if device.startswith('cuda') :
+                device = 'gpu'
             accelerator = device
         
         super().__init__(accelerator=accelerator, strategy=strategy, devices=devices, num_nodes=num_nodes, precision=precision, logger=logger, callbacks=callbacks, fast_dev_run=fast_dev_run, max_epochs=max_epochs, min_epochs=min_epochs, max_steps=max_steps, min_steps=min_steps, max_time=max_time, limit_train_batches=limit_train_batches, limit_val_batches=limit_val_batches, limit_test_batches=limit_test_batches, limit_predict_batches=limit_predict_batches, overfit_batches=overfit_batches, val_check_interval=val_check_interval, check_val_every_n_epoch=check_val_every_n_epoch, num_sanity_val_steps=num_sanity_val_steps, log_every_n_steps=log_every_n_steps, enable_checkpointing=enable_checkpointing, enable_progress_bar=enable_progress_bar, enable_model_summary=enable_model_summary, accumulate_grad_batches=accumulate_grad_batches, gradient_clip_val=gradient_clip_val, gradient_clip_algorithm=gradient_clip_algorithm, deterministic=deterministic, benchmark=benchmark, inference_mode=inference_mode, use_distributed_sampler=use_distributed_sampler, profiler=profiler, detect_anomaly=detect_anomaly, barebones=barebones, plugins=plugins, sync_batchnorm=sync_batchnorm, reload_dataloaders_every_n_epochs=reload_dataloaders_every_n_epochs, default_root_dir=default_root_dir)

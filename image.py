@@ -27,6 +27,8 @@ class Image :
                 self._original_img = cv.imread(img)
                 if self.original_img is None :
                     raise RuntimeError(f'Unable to read image {img}')
+                # OpenCV uses the BGR convention, so it is converted to have RGB images
+                self._original_img = cv.cvtColor(self.original_img, cv.COLOR_BGR2RGB)
                 
                 # Convert single channel image to 3 channels if necessary
                 if len(self.original_img.shape) == 2 : 
@@ -256,6 +258,9 @@ class Image :
     
 
     def _compute_normalized_rgb(self) :
+        """Compute the normalized image using the provided normalization means and stds.
+        If the rgb image is already normalized, consider it as normalized and compute the corresponding unnormalized image.
+        """
         if not self._is_normalized :
             self._normalized_rgb = (self.rgb_img - self.normalize_means) / self.normalize_stds
         else :
@@ -263,6 +268,37 @@ class Image :
             self._rgb_img = self.normalized_rgb * self.normalize_stds + self.normalize_means
             self._original_img = self.rgb_img
 
+
+    def resize(self, new_shape) :
+        """Resize rgb and normalized image with the provided shape in the format (height, width, [3]). Original image remains unchanged
+
+        Args:
+            new_shape (list): Shape of the new image
+
+        Raises:
+            ValueError: If the provided shape is in an invalid format
+        """
+        try :
+            l = len(new_shape)
+        except Exception as e :
+            raise ValueError("The shape must be a 2D or 3D list or tuple") from None
+        
+        match l :
+            case 2 :
+               pass
+            case 3 :
+                if new_shape[-1] != 3 :
+                    raise ValueError("Invalid shape, the provided shape must have 3 channels (in the last dimension)")
+                new_shape = new_shape[0:2] # The channel dimension should not be used for resizing the image
+            case _ :
+                raise ValueError("Please provide a valid 2D or 3D shape for the image")
+
+        new_shape = [new_shape[1], new_shape[0]] # Height and width have to be reversed for the resize function of OpenCV    
+        self._rgb_img = cv.resize(self.rgb_img, new_shape)
+        self._normalized_rgb = cv.resize(self.normalized_rgb, new_shape)
+        self._shape = self.rgb_img.shape
+        self._height = self.shape[0]
+        self._width = self.shape[1]
 
     def to(self, device) :
         """Switch the image to the specified device (For example, "cpu" or "cuda"). Useful mainly when working on Tensors.
@@ -303,7 +339,7 @@ class Image :
 
     def show(self) :
         """Plot the image to visualize it"""
-        plt.imshow(self.rgb_img)
+        plt.imshow(self.original_img)
         plt.show()
     
 

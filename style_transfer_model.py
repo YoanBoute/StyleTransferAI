@@ -11,6 +11,41 @@ from image import Image
 from hooked_vgg import Hooked_VGG
 from custom_trainer import CustomTrainer
 
+
+def gram_matrix(features : torch.Tensor) :
+    """Compute the Gram matrix of a layer's features
+
+    Args:
+        features (torch.Tensor): Features to compute the Gram matrix on
+
+    Returns:
+        Tensor: The Gram matrix of the features
+    """
+    num_features = features.shape[1]
+    # Gram matrix can be computed as the features multiplied by themselves transposed, under the condition that the features are a matrix of size num_features x num_elements_per_feature
+    matrix = features.view(num_features, -1)
+    return matrix.matmul(matrix.T)
+
+
+def squared_error_loss(tensorA : torch.Tensor, tensorB : torch.Tensor) :
+    """Compute the squared error loss between two tensors (not the mean squared error)
+
+    Args:
+        tensorA (torch.Tensor): First Tensor
+        tensorB (torch.Tensor): Second Tensor
+
+    Raises:
+        ValueError: If the Tensors don't have the same shape
+
+    Returns:
+        torch.Tensor: The squared error loss
+    """ 
+    if tensorA.shape != tensorB.shape :
+        raise ValueError("Tensors must have the same shape")
+    
+    return torch.sum((tensorA - tensorB)**2)
+
+
 class StyleTransferModel(L.LightningModule) :
     """Lightning Module to encapsulate the training process of creating an image with the content from one image and the style of another"""
     def __init__(self, content_img : Image, style_img : Image, content_feat_layers : list, style_feat_layers : list, vgg_model : Hooked_VGG = None, *args, **kwargs):
@@ -31,14 +66,10 @@ class StyleTransferModel(L.LightningModule) :
         
         self.content_img  = content_img
         self.style_img    = style_img
-        if self.content_img.device != self.used_device or self.style_img.device != self.used_device :
-            print("Warning : Different devices were detected. Using the device of the model as reference...")
-            self.content_img.to(self.used_device)
-            self.style_img.to(self.used_device)
-
-        train_img = Image(white_noise_shape = self.content_img.shape).to(self.used_device)
+        
+        # train_img = Image(white_noise_shape = self.content_img.shape).to(self.used_device)
         self._train_img_history = []
-        self._train_tensor = torch.nn.Parameter(train_img.to_tensor())
+        self._train_tensor = torch.nn.Parameter(self.content_img.to_tensor().clone())
 
         self._trained_img = None
 
@@ -47,6 +78,49 @@ class StyleTransferModel(L.LightningModule) :
         """Temporary function"""
         loss = torch.nn.MSELoss()
         return loss(list(self.content_features.values())[0], list(content_train_features.values())[0])
+    
+    def _content_loss(self, content_train_features) :
+        content_loss = 1/2 * squared_error_loss(list(self.content_features.values())[0], list(content_train_features.values())[0])
+        
+        self.log('Content loss', content_loss, prog_bar=True, on_step=False, on_epoch=True, logger=True)
+        
+        return content_loss
+
+    def _style_loss(self, style_train_features) :
+        if len(self.style_features) != len(style_train_features) :
+            raise ValueError("The train features do not correspond to the image features")
+        
+        img_gram_matrices = {}
+        train_gram_matrices = {}
+        num_features = {}
+        num_elems = {}
+        for key in self.style_features.keys() :
+            if style_train_features.get(key) is None or style_train_features[key].shape != self.style_features[key].shape :
+                print(style_train_features[key].shape)
+                print(self.style_features[key].shape)
+                raise ValueError("The train features do not correspond to the image features")
+            
+            num_features[key] = self.style_features[key].shape[1]
+            num_elems[key] = self.style_features[key].shape[2] * self.style_features[key].shape[3]
+            img_gram_matrices[key] = (gram_matrix(self.style_features[key]))
+            train_gram_matrices[key] = (gram_matrix(style_train_features[key]))
+
+        normalized_losses = torch.empty(len(img_gram_matrices))
+        for i, key in enumerate(img_gram_matrices.keys()) :
+            norm_coef = 1/(4 * num_features[key]**2 * num_elems[key]**2)
+            normalized_losses[i] = norm_coef * squared_error_loss(img_gram_matrices[key], train_gram_matrices[key])
+        
+        style_loss = 1/len(normalized_losses) * torch.sum(normalized_losses)
+
+        self.log('Style loss', style_loss, prog_bar=True, on_step=False, on_epoch=True, logger=True)
+
+        return style_loss
+
+    def _total_loss(self, content_train_features, style_train_features) :
+        content_loss = self._content_loss(content_train_features)
+        style_loss = self._style_loss(style_train_features)
+
+        return 0 * content_loss + style_loss
 
     def forward(self, x : torch.Tensor) :
         return self.vgg_model.get_features(x)
@@ -55,14 +129,15 @@ class StyleTransferModel(L.LightningModule) :
         content_train_feat = self._compute_features(self._train_tensor, 'content')
         style_train_feat   = self._compute_features(self._train_tensor, 'style')
 
-        loss = self.ST_loss(content_train_feat, style_train_feat)
-
+        # loss = self._total_loss(content_train_feat, style_train_feat)
+        loss = self._total_loss(content_train_feat, style_train_feat)
         self.log('General loss', loss, prog_bar=True, on_step=False, on_epoch=True, logger=True)
 
         return loss
     
     def configure_optimizers(self) :
-        return torch.optim.Adam([self._train_tensor], lr=0.1)
+        return torch.optim.Adam([self._train_tensor], lr=1)
+        # return torch.optim.LBFGS([self._train_tensor])
     
     def on_train_end(self):
         # When the training is complete, retrieve the Image corresponding to the trained tensor
@@ -70,8 +145,9 @@ class StyleTransferModel(L.LightningModule) :
         return super().on_train_end()
     
     def on_train_epoch_end(self):
-        # After each epoch, save the state of the trained image in history
-        self._train_img_history.append(Image(self._train_tensor.clone().detach()))
+        # After each 100 epoch, save the state of the trained image in history
+        if self.current_epoch % 100 == 0 :
+            self._train_img_history.append(Image(self._train_tensor.clone().detach()))
         return super().on_train_epoch_end()
     
     def _compute_features(self, x : torch.Tensor, feat_type : str) :
@@ -113,9 +189,9 @@ class StyleTransferModel(L.LightningModule) :
 
         if not from_checkpoint :
             # Reset the train Tensor and the training history
-            train_img = Image(white_noise_shape = self.content_img.shape).to(self.used_device)
+            # train_img = Image(white_noise_shape = self.content_img.shape).to(self.used_device)
             self._train_img_history = []
-            self._train_tensor = torch.nn.Parameter(train_img.to_tensor())
+            self._train_tensor = torch.nn.Parameter(self.content_img.to_tensor().clone())
             ckpt_path = None
             logger = None
             total_epochs = None
@@ -137,7 +213,8 @@ class StyleTransferModel(L.LightningModule) :
                 else :
                     ckpt_path = ckpt_files_list[0]
             total_epochs = kwargs['max_epochs'] - self.current_epoch # Compute the number of actual epochs of the training to have a coherent progress bar
-        
+            self._train_tensor = torch.nn.Parameter(self._train_tensor.data.to(self.used_device))
+
         self.trainer = CustomTrainer(logger=logger, total_epochs=total_epochs, device=self.used_device, **kwargs)
         self.trainer.fit(self, ckpt_path=ckpt_path)
 
@@ -183,6 +260,7 @@ class StyleTransferModel(L.LightningModule) :
             self._style_features[key] = self._style_features[key].to(device)
 
         self._used_device = device
+        self._device = self.used_device
 
     
     @property
@@ -212,9 +290,10 @@ class StyleTransferModel(L.LightningModule) :
         if not isinstance(new_value, Image) :
             raise ValueError("style_img should be an Image")
         self._style_img = new_value
+        self.style_img.resize(self.content_img.shape) # Style and content image must have the same size for the trained image to have same feature size as both content and style features
         if self.style_img.device != self.used_device :
             self.style_img.to(self.used_device)
-        self._style_features = self._compute_features(self.style_img.to_tensor(), 'content')
+        self._style_features = self._compute_features(self.style_img.to_tensor(), 'style')
     
     @style_img.deleter
     def style_img(self) :
@@ -234,6 +313,7 @@ class StyleTransferModel(L.LightningModule) :
         # If no device is defined (during initialization), the device of the model is used as reference
         if self.__dict__.get('used_device') is None :
             self._used_device = str(self.vgg_model.device)
+            self._device = self.used_device
         elif self.vgg_model.device != self.used_device :
             self.vgg_model.to(self.used_device)
 
@@ -256,6 +336,9 @@ class StyleTransferModel(L.LightningModule) :
         if not isinstance(new_value, list) and not isinstance(new_value, np.ndarray) :
             raise ValueError("Please provide a list of layer indices")
         self._content_feat_layers = new_value
+        
+        if self.__dict__.get('content_img') is not None :
+            self._content_features = self._compute_features(self.content_img.to_tensor(), 'content')
     
     @content_feat_layers.deleter
     def content_feat_layers(self) :
@@ -271,9 +354,12 @@ class StyleTransferModel(L.LightningModule) :
         if not isinstance(new_value, list) and not isinstance(new_value, np.ndarray) :
             raise ValueError("Please provide a list of layer indices")
         self._style_feat_layers = new_value
+
+        if self.__dict__.get('style_img') is not None :
+            self._style_features = self._compute_features(self.style_img.to_tensor(), 'style')
     
-    @content_feat_layers.deleter
-    def content_feat_layers(self) :
+    @style_feat_layers.deleter
+    def style_feat_layers(self) :
         raise AttributeError("Deletion of this attribute is not authorized")
     
 
