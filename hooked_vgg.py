@@ -16,7 +16,11 @@ class Hooked_VGG :
         """
         self._device = "cuda" if torch.cuda.is_available() else "cpu"
         # Retrieve only the features extraction part of the model, as the classifier won't be used
-        self._vgg = models.vgg19(weights=VGG19_Weights.IMAGENET1K_V1).features.to(self.device)
+        self._vgg = models.vgg19(weights=VGG19_Weights.IMAGENET1K_V1).features.to(self.device).eval()
+        # Replace Max Pooling layers with Average Pooling to have smoother images
+        for i, layer in enumerate(self.vgg):
+            if isinstance(layer, torch.nn.MaxPool2d):
+                self._vgg[i] = torch.nn.AvgPool2d(kernel_size=2, stride=2, padding=0)
         # self._device = self.vgg[0].device
         self.trainable = False
         self._conv_features = {}

@@ -47,7 +47,7 @@ class Image :
                 img_height = img.shape[2]
                 img_width = img.shape[3]
 
-                self._original_img = img.cpu().clone().detach().reshape((img_height, img_width, 3)).numpy()
+                self._original_img = img.cpu().clone().detach().squeeze(0).permute(1,2,0).numpy()
                 self._rgb_img = self.original_img
 
                 self.trainable = False # An image coming from a Tensor is usually already trained, and has no reason to be modified
@@ -150,7 +150,7 @@ class Image :
     def normalize_means(self, new_value) :
         if not (isinstance(new_value, list) or isinstance(new_value, np.ndarray) or isinstance(new_value, torch.Tensor)) or len(new_value) != 3 :
             raise ValueError("normalize_means should be a 3 elements list providing the means with which to normalize respectivley red, green and blue channels in the image.")
-        self._normalize_means = torch.Tensor(new_value).view(1,3,1,1)
+        self._normalize_means = torch.Tensor(new_value).reshape(1,3,1,1)
         self._compute_normalized_rgb()
     
     @normalize_means.deleter
@@ -166,7 +166,7 @@ class Image :
     def normalize_stds(self, new_value) :
         if not (isinstance(new_value, list) or isinstance(new_value, np.ndarray) or isinstance(new_value, torch.Tensor)) or len(new_value) != 3 :
             raise ValueError("normalize_stds should be a 3 elements list providing the means with which to normalize respectivley red, green and blue channels in the image.")
-        self._normalize_stds = torch.Tensor(new_value).view(1,3,1,1)
+        self._normalize_stds = torch.Tensor(new_value).reshape(1,3,1,1)
         self._compute_normalized_rgb()
     
     @normalize_stds.deleter
@@ -264,7 +264,7 @@ class Image :
         if not self._is_normalized :
             self._normalized_rgb = (self.rgb_img - self.normalize_means) / self.normalize_stds
         else :
-            self._normalized_rgb = self._rgb_img
+            self._normalized_rgb = self.rgb_img
             self._rgb_img = self.normalized_rgb * self.normalize_stds + self.normalize_means
             self._original_img = self.rgb_img
 
@@ -294,11 +294,14 @@ class Image :
                 raise ValueError("Please provide a valid 2D or 3D shape for the image")
 
         new_shape = [new_shape[1], new_shape[0]] # Height and width have to be reversed for the resize function of OpenCV    
+        self._original_img = cv.resize(self.original_img, new_shape)
         self._rgb_img = cv.resize(self.rgb_img, new_shape)
         self._normalized_rgb = cv.resize(self.normalized_rgb, new_shape)
         self._shape = self.rgb_img.shape
         self._height = self.shape[0]
         self._width = self.shape[1]
+
+        return self
 
     def to(self, device) :
         """Switch the image to the specified device (For example, "cpu" or "cuda"). Useful mainly when working on Tensors.
@@ -332,13 +335,14 @@ class Image :
             Tensor: The Tensor corresponding to the image, with shape (1, 3, height, width)
         """
         if self.normalize :
-            return torch.Tensor(self.normalized_rgb).reshape((1,3,self.height, self.width)).to(self.device).requires_grad_(self.trainable)
+            return torch.Tensor(self.normalized_rgb).permute(2,0,1).unsqueeze(0).contiguous().to(self.device).requires_grad_(self.trainable)
         else :
-            return torch.Tensor(self.rgb_img).reshape((1,3,self.height, self.width)).to(self.device).requires_grad_(self.trainable)
+            return torch.Tensor(self.rgb_img).permute(2,0,1).unsqueeze(0).contiguous().to(self.device).requires_grad_(self.trainable)
         
 
     def show(self) :
         """Plot the image to visualize it"""
+        plt.axis('off')
         plt.imshow(self.original_img)
         plt.show()
     
@@ -362,6 +366,8 @@ class Image :
                 return
 
         save_path.parent.mkdir(parents=True, exist_ok=True)
-        saved = cv.imwrite(save_path, self.rgb_img)
+        cv_img = cv.cvtColor((self.original_img.clip(0,1) * 255).astype('uint8'), cv.COLOR_RGB2BGR)
+
+        saved = cv.imwrite(save_path, cv_img)
         if not saved :
             raise RuntimeError("Unable to save the image. This can be due to an invalid image or to an impossibility to write in the target folder")

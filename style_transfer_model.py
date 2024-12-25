@@ -3,6 +3,7 @@ import lightning as L
 from lightning.pytorch.loggers import TensorBoardLogger
 from torch.utils.data import DataLoader
 import numpy as np
+import matplotlib.pyplot as plt
 from pathlib import Path
 from copy import copy, deepcopy
 import os
@@ -21,29 +22,13 @@ def gram_matrix(features : torch.Tensor) :
     Returns:
         Tensor: The Gram matrix of the features
     """
-    num_features = features.shape[1]
+    b, num_features, h, w = features.size()
     # Gram matrix can be computed as the features multiplied by themselves transposed, under the condition that the features are a matrix of size num_features x num_elements_per_feature
-    matrix = features.view(num_features, -1)
-    return matrix.matmul(matrix.T)
-
-
-def squared_error_loss(tensorA : torch.Tensor, tensorB : torch.Tensor) :
-    """Compute the squared error loss between two tensors (not the mean squared error)
-
-    Args:
-        tensorA (torch.Tensor): First Tensor
-        tensorB (torch.Tensor): Second Tensor
-
-    Raises:
-        ValueError: If the Tensors don't have the same shape
-
-    Returns:
-        torch.Tensor: The squared error loss
-    """ 
-    if tensorA.shape != tensorB.shape :
-        raise ValueError("Tensors must have the same shape")
-    
-    return torch.sum((tensorA - tensorB)**2)
+    matrix = features.reshape(b, num_features, w*h)
+    matrix_t = matrix.transpose(1,2)
+    gram = matrix.bmm(matrix_t)
+    # gram /= num_features * h * w
+    return gram
 
 
 class StyleTransferModel(L.LightningModule) :
@@ -69,7 +54,7 @@ class StyleTransferModel(L.LightningModule) :
         
         # train_img = Image(white_noise_shape = self.content_img.shape).to(self.used_device)
         self._train_img_history = []
-        self._train_tensor = torch.nn.Parameter(self.content_img.to_tensor().clone())
+        # self._train_tensor = torch.nn.Parameter(self.style_img.to_tensor().clone())
 
         self._trained_img = None
 
@@ -80,8 +65,9 @@ class StyleTransferModel(L.LightningModule) :
         return loss(list(self.content_features.values())[0], list(content_train_features.values())[0])
     
     def _content_loss(self, content_train_features) :
-        content_loss = 1/2 * squared_error_loss(list(self.content_features.values())[0], list(content_train_features.values())[0])
-        
+        content_loss = 1/2 * torch.nn.MSELoss(reduction='sum')(list(self.content_features.values())[0], list(content_train_features.values())[0])
+        # content_loss = torch.nn.MSELoss(reduction='mean')(list(self.content_features.values())[0], list(content_train_features.values())[0])
+
         self.log('Content loss', content_loss, prog_bar=True, on_step=False, on_epoch=True, logger=True)
         
         return content_loss
@@ -102,14 +88,14 @@ class StyleTransferModel(L.LightningModule) :
             
             num_features[key] = self.style_features[key].shape[1]
             num_elems[key] = self.style_features[key].shape[2] * self.style_features[key].shape[3]
-            img_gram_matrices[key] = (gram_matrix(self.style_features[key]))
-            train_gram_matrices[key] = (gram_matrix(style_train_features[key]))
+            img_gram_matrices[key] = gram_matrix(self.style_features[key])
+            train_gram_matrices[key] = gram_matrix(style_train_features[key])
 
         normalized_losses = torch.empty(len(img_gram_matrices))
         for i, key in enumerate(img_gram_matrices.keys()) :
             norm_coef = 1/(4 * num_features[key]**2 * num_elems[key]**2)
-            normalized_losses[i] = norm_coef * squared_error_loss(img_gram_matrices[key], train_gram_matrices[key])
-        
+            normalized_losses[i] = norm_coef * torch.nn.MSELoss(reduction='sum')(img_gram_matrices[key], train_gram_matrices[key])
+            # normalized_losses[i] = torch.nn.MSELoss(reduction='sum')(img_gram_matrices[key][0], train_gram_matrices[key][0])
         style_loss = 1/len(normalized_losses) * torch.sum(normalized_losses)
 
         self.log('Style loss', style_loss, prog_bar=True, on_step=False, on_epoch=True, logger=True)
@@ -120,7 +106,7 @@ class StyleTransferModel(L.LightningModule) :
         content_loss = self._content_loss(content_train_features)
         style_loss = self._style_loss(style_train_features)
 
-        return 0 * content_loss + style_loss
+        return 1 * content_loss + 1e6 * style_loss
 
     def forward(self, x : torch.Tensor) :
         return self.vgg_model.get_features(x)
@@ -136,17 +122,19 @@ class StyleTransferModel(L.LightningModule) :
         return loss
     
     def configure_optimizers(self) :
-        return torch.optim.Adam([self._train_tensor], lr=1)
+        return torch.optim.Adam([self._train_tensor], lr=1e-1)
         # return torch.optim.LBFGS([self._train_tensor])
     
     def on_train_end(self):
         # When the training is complete, retrieve the Image corresponding to the trained tensor
         self._trained_img = Image(self.train_tensor)
+        # self._trained_img.resize(self.content_img.original_img.shape)
+        # self.trained_img.show()
         return super().on_train_end()
     
     def on_train_epoch_end(self):
-        # After each 100 epoch, save the state of the trained image in history
-        if self.current_epoch % 100 == 0 :
+        # After each 5 epoch, save the state of the trained image in history
+        if self.current_epoch % 5 == 0 :
             self._train_img_history.append(Image(self._train_tensor.clone().detach()))
         return super().on_train_epoch_end()
     
@@ -189,9 +177,10 @@ class StyleTransferModel(L.LightningModule) :
 
         if not from_checkpoint :
             # Reset the train Tensor and the training history
-            # train_img = Image(white_noise_shape = self.content_img.shape).to(self.used_device)
+            train_img = Image(white_noise_shape = self.content_img.shape).to(self.used_device)
+            # train_img = Image(Path('./test_images/van_gogh_style.png')).resize((224,224))
             self._train_img_history = []
-            self._train_tensor = torch.nn.Parameter(self.content_img.to_tensor().clone())
+            self._train_tensor = torch.nn.Parameter(train_img.to_tensor().clone())
             ckpt_path = None
             logger = None
             total_epochs = None
@@ -219,6 +208,7 @@ class StyleTransferModel(L.LightningModule) :
         self.trainer.fit(self, ckpt_path=ckpt_path)
 
         self.trained_img.show()
+        # plt.imshow(self.trained_img.rgb_img)
     
     def to(self, device) :
         """Switch the model to the indicated computation device ("cpu" or "cuda", for example). 
@@ -272,6 +262,7 @@ class StyleTransferModel(L.LightningModule) :
         if not isinstance(new_value, Image) :
             raise ValueError("content_img should be an Image")
         self._content_img = new_value
+        # self.content_img.resize((224,224))
         if self.content_img.device != self.used_device :
             self.content_img.to(self.used_device)
         self._content_features = self._compute_features(self.content_img.to_tensor(), 'content')
@@ -291,6 +282,7 @@ class StyleTransferModel(L.LightningModule) :
             raise ValueError("style_img should be an Image")
         self._style_img = new_value
         self.style_img.resize(self.content_img.shape) # Style and content image must have the same size for the trained image to have same feature size as both content and style features
+        # self.style_img.resize((224,224))
         if self.style_img.device != self.used_device :
             self.style_img.to(self.used_device)
         self._style_features = self._compute_features(self.style_img.to_tensor(), 'style')
