@@ -1,5 +1,6 @@
 import torch
 import lightning as L
+# from torchvision.image import TotalVariation 
 from lightning.pytorch.loggers import TensorBoardLogger
 from torch.utils.data import DataLoader
 import numpy as np
@@ -27,13 +28,13 @@ def gram_matrix(features : torch.Tensor) :
     matrix = features.reshape(b, num_features, w*h)
     matrix_t = matrix.transpose(1,2)
     gram = matrix.bmm(matrix_t)
-    # gram /= num_features * h * w
+    gram /= num_features * h * w
     return gram
 
 
 class StyleTransferModel(L.LightningModule) :
     """Lightning Module to encapsulate the training process of creating an image with the content from one image and the style of another"""
-    def __init__(self, content_img : Image, style_img : Image, content_feat_layers : list, style_feat_layers : list, vgg_model : Hooked_VGG = None, *args, **kwargs):
+    def __init__(self, content_img : Image, style_img : Image, *, start_with : str = 'noise', content_loss_weight : float = 1, style_loss_weight : float = 1e4, tv_loss_weight = 1e1, optimizer : str = 'LBFGS', lr : float = 1, optimizer_kwargs : dict = None, content_feat_layers : list = [22], style_feat_layers : list = [1,6,11,20,29], vgg_model : Hooked_VGG = None, **kwargs):
         """Initialize the model
 
         Args:
@@ -43,7 +44,7 @@ class StyleTransferModel(L.LightningModule) :
             style_feat_layers (list): List of indices of the convolutional layers from which to extract features for the style
             vgg_model (Hooked_VGG, optional): Model to use for feature extraction. Defaults to None.
         """
-        super().__init__(*args, **kwargs)
+        super().__init__(**kwargs)
         self.vgg_model = vgg_model if vgg_model is not None else Hooked_VGG()
 
         self.content_feat_layers = content_feat_layers
@@ -51,7 +52,17 @@ class StyleTransferModel(L.LightningModule) :
         
         self.content_img  = content_img
         self.style_img    = style_img
+
+        self.start_with = start_with
+
+        self.content_loss_weight = content_loss_weight
+        self.style_loss_weight   = style_loss_weight
+        self.tv_loss_weight      = tv_loss_weight
         
+        self.optimizer = optimizer
+        self.lr = lr
+        self.optimizer_kwargs = optimizer_kwargs if optimizer_kwargs is not None else {}
+
         # train_img = Image(white_noise_shape = self.content_img.shape).to(self.used_device)
         self._train_img_history = []
         # self._train_tensor = torch.nn.Parameter(self.style_img.to_tensor().clone())
@@ -59,13 +70,11 @@ class StyleTransferModel(L.LightningModule) :
         self._trained_img = None
 
     
-    def ST_loss(self, content_train_features, style_train_features) :
-        """Temporary function"""
-        loss = torch.nn.MSELoss()
-        return loss(list(self.content_features.values())[0], list(content_train_features.values())[0])
-    
     def _content_loss(self, content_train_features) :
-        content_loss = 1/2 * torch.nn.MSELoss(reduction='sum')(list(self.content_features.values())[0], list(content_train_features.values())[0])
+        content_loss = 0.0
+        for key in self.content_features.keys() :
+            content_loss += torch.nn.MSELoss(reduction='mean')(self.content_features[key], content_train_features[key])
+        content_loss /= len(self.content_features)
         # content_loss = torch.nn.MSELoss(reduction='mean')(list(self.content_features.values())[0], list(content_train_features.values())[0])
 
         self.log('Content loss', content_loss, prog_bar=True, on_step=False, on_epoch=True, logger=True)
@@ -91,22 +100,34 @@ class StyleTransferModel(L.LightningModule) :
             img_gram_matrices[key] = gram_matrix(self.style_features[key])
             train_gram_matrices[key] = gram_matrix(style_train_features[key])
 
-        normalized_losses = torch.empty(len(img_gram_matrices))
-        for i, key in enumerate(img_gram_matrices.keys()) :
-            norm_coef = 1/(4 * num_features[key]**2 * num_elems[key]**2)
-            normalized_losses[i] = norm_coef * torch.nn.MSELoss(reduction='sum')(img_gram_matrices[key], train_gram_matrices[key])
+        style_loss = 0.0
+        for key in img_gram_matrices.keys() :
+            # norm_coef = 1/(4 * num_features[key]**2 * num_elems[key]**2)
+            norm_coef = 1
+            style_loss += norm_coef * torch.nn.MSELoss(reduction='sum')(img_gram_matrices[key], train_gram_matrices[key])
             # normalized_losses[i] = torch.nn.MSELoss(reduction='sum')(img_gram_matrices[key][0], train_gram_matrices[key][0])
-        style_loss = 1/len(normalized_losses) * torch.sum(normalized_losses)
+        style_loss /= len(img_gram_matrices)
 
         self.log('Style loss', style_loss, prog_bar=True, on_step=False, on_epoch=True, logger=True)
 
         return style_loss
+    
+    def _total_variation_loss(self, img):
+        tv_loss = torch.sum(torch.abs(img[:, :, :, :-1] - img[:, :, :, 1:])) + \
+                  torch.sum(torch.abs(img[:, :, :-1, :] - img[:, :, 1:, :]))
+
+        self.log('TV Loss', tv_loss, prog_bar=True, on_step=False, on_epoch=True, logger=True)
+        
+        return tv_loss
+
 
     def _total_loss(self, content_train_features, style_train_features) :
         content_loss = self._content_loss(content_train_features)
         style_loss = self._style_loss(style_train_features)
+        tv_loss = self._total_variation_loss(self._train_tensor)
 
-        return 1 * content_loss + 1e6 * style_loss
+        return self.content_loss_weight * content_loss + self.style_loss_weight * style_loss + self.tv_loss_weight * tv_loss
+    
 
     def forward(self, x : torch.Tensor) :
         return self.vgg_model.get_features(x)
@@ -122,14 +143,11 @@ class StyleTransferModel(L.LightningModule) :
         return loss
     
     def configure_optimizers(self) :
-        return torch.optim.Adam([self._train_tensor], lr=1e-1)
-        # return torch.optim.LBFGS([self._train_tensor])
+        return self._optimizer([self._train_tensor], lr=self.lr, **self.optimizer_kwargs)
     
     def on_train_end(self):
         # When the training is complete, retrieve the Image corresponding to the trained tensor
         self._trained_img = Image(self.train_tensor)
-        # self._trained_img.resize(self.content_img.original_img.shape)
-        # self.trained_img.show()
         return super().on_train_end()
     
     def on_train_epoch_end(self):
@@ -137,6 +155,7 @@ class StyleTransferModel(L.LightningModule) :
         if self.current_epoch % 5 == 0 :
             self._train_img_history.append(Image(self._train_tensor.clone().detach()))
         return super().on_train_epoch_end()
+    
     
     def _compute_features(self, x : torch.Tensor, feat_type : str) :
         """Compute the features of an image, using specific layers for content extraction and for style extraction.
@@ -177,9 +196,13 @@ class StyleTransferModel(L.LightningModule) :
 
         if not from_checkpoint :
             # Reset the train Tensor and the training history
-            train_img = Image(white_noise_shape = self.content_img.shape).to(self.used_device)
-            # train_img = Image(Path('./test_images/van_gogh_style.png')).resize((224,224))
             self._train_img_history = []
+            if self.start_with == 'noise' :
+                train_img = Image(white_noise_shape = self.content_img.shape).to(self.used_device)
+            elif self.start_with == 'content' :
+                train_img = self.content_img
+            else :
+                train_img = self.style_img
             self._train_tensor = torch.nn.Parameter(train_img.to_tensor().clone())
             ckpt_path = None
             logger = None
@@ -204,12 +227,11 @@ class StyleTransferModel(L.LightningModule) :
             total_epochs = kwargs['max_epochs'] - self.current_epoch # Compute the number of actual epochs of the training to have a coherent progress bar
             self._train_tensor = torch.nn.Parameter(self._train_tensor.data.to(self.used_device))
 
-        self.trainer = CustomTrainer(logger=logger, total_epochs=total_epochs, device=self.used_device, **kwargs)
+        self.trainer = CustomTrainer(logger=logger, total_epochs=total_epochs, monitor_losses=['General loss'], device=self.used_device, **kwargs)
         self.trainer.fit(self, ckpt_path=ckpt_path)
 
         self.trained_img.show()
-        # plt.imshow(self.trained_img.rgb_img)
-    
+        
     def to(self, device) :
         """Switch the model to the indicated computation device ("cpu" or "cuda", for example). 
         If switching is not possible, the model will remain as before.
@@ -430,4 +452,124 @@ class StyleTransferModel(L.LightningModule) :
     
     @used_device.deleter
     def used_device(self) :
+        raise AttributeError("Deletion of this attribute is not authorized")
+    
+
+    @property
+    def start_with(self) :
+        return self._start_with
+    
+    @start_with.setter
+    def start_with(self, new_value) :
+        if new_value not in ['noise', 'content', 'style'] :
+            raise ValueError("Invalid value for start_with. Please give a value in ['noise', 'content', 'style']")
+        self._start_with = new_value
+    
+    @start_with.deleter
+    def start_with(self) :
+        raise AttributeError("Deletion of this attribute is not authorized")
+    
+
+    @property
+    def content_loss_weight(self) :
+        return self._content_loss_weight
+    
+    @content_loss_weight.setter
+    def content_loss_weight(self, new_value) :
+        if not isinstance(new_value, float) and not isinstance(new_value, int) :
+            raise TypeError("content_loss_weight should be a Float")
+        self._content_loss_weight = new_value
+    
+    @content_loss_weight.deleter
+    def content_loss_weight(self) :
+        raise AttributeError("Deletion of this attribute is not authorized")
+    
+    
+    @property
+    def style_loss_weight(self) :
+        return self._style_loss_weight
+    
+    @style_loss_weight.setter
+    def style_loss_weight(self, new_value) :
+        if not isinstance(new_value, float) and not isinstance(new_value, int) :
+            raise TypeError("style_loss_weight should be a Float")
+        self._style_loss_weight = new_value
+    
+    @style_loss_weight.deleter
+    def style_loss_weight(self) :
+        raise AttributeError("Deletion of this attribute is not authorized")
+    
+
+    @property
+    def tv_loss_weight(self) :
+        return self._tv_loss_weight
+    
+    @tv_loss_weight.setter
+    def tv_loss_weight(self, new_value) :
+        if not isinstance(new_value, float) and not isinstance(new_value, int) :
+            raise TypeError("tv_loss_weight should be a Float")
+        self._tv_loss_weight = new_value
+    
+    @tv_loss_weight.deleter
+    def tv_loss_weight(self) :
+        raise AttributeError("Deletion of this attribute is not authorized")
+    
+
+    @property
+    def optimizer(self) :
+        return self._optimizer_str
+    
+    @optimizer.setter
+    def optimizer(self, new_value) :
+        match new_value : 
+            case 'LBFGS' :
+               self._optimizer = torch.optim.LBFGS
+            case 'Adam' :
+                self._optimizer = torch.optim.Adam
+            case _ :
+                try : 
+                    self._optimizer = eval(f'torch.optim.{new_value}')
+                except :
+                    raise ValueError("The specified optimizer was not found in Torch. It is recommended to set it to 'LBFGS' or 'Adam' for style transfer") from None       
+        self._optimizer_str = new_value
+    
+    @optimizer.deleter
+    def optimizer(self) :
+        raise AttributeError("Deletion of this attribute is not authorized")
+    
+
+    @property
+    def lr(self) :
+        return self._lr
+    
+    @lr.setter
+    def lr(self, new_value) :
+        if not isinstance(new_value, float) and not isinstance(new_value, int) :
+            raise TypeError("Learning rate should be a Float value")
+        self._lr = new_value
+    
+    @lr.deleter
+    def lr(self) :
+        raise AttributeError("Deletion of this attribute is not authorized")
+    
+
+    @property
+    def optimizer_kwargs(self) :
+        return self._optimizer_kwargs
+    
+    @optimizer_kwargs.setter
+    def optimizer_kwargs(self, new_value) :
+        if not isinstance(new_value, dict) :
+            raise TypeError("Optimizer's kwargs should be a dict")
+        # Check validity of the kwargs
+        try :
+            blank_tensor = torch.zeros_like(self.content_img.to_tensor(), requires_grad=True)
+            o = self._optimizer([blank_tensor], **new_value)
+        except :
+            raise ValueError("Invalid keyword arguments provided to the optimizer") from None
+        
+        self._optimizer_kwargs = new_value
+    
+    @optimizer_kwargs.deleter
+    def optimizer_kwargs(self) :
         raise AttributeError("Deletion of this attribute is not authorized")
