@@ -1,8 +1,10 @@
+import scipy.special
 import torch
 import numpy as np
 import cv2 as cv
 from pathlib import Path
 import matplotlib.pyplot as plt
+import scipy
 
 class Image :
     """Class to encapsulate generic behavior of an image."""
@@ -47,7 +49,7 @@ class Image :
                 img_height = img.shape[2]
                 img_width = img.shape[3]
 
-                self._original_img = img.cpu().clone().detach().squeeze(0).permute(1,2,0).numpy()
+                self._original_img = img.clone().cpu().detach().squeeze(0).permute(1,2,0).numpy()
                 self._rgb_img = self.original_img
 
                 self.trainable = False # An image coming from a Tensor is usually already trained, and has no reason to be modified
@@ -265,7 +267,7 @@ class Image :
             self._normalized_rgb = (self.rgb_img - self.normalize_means) / self.normalize_stds
         else :
             self._normalized_rgb = self.rgb_img
-            self._rgb_img = self.normalized_rgb * self.normalize_stds + self.normalize_means
+            self._rgb_img = (self.normalized_rgb * self.normalize_stds + self.normalize_means).clip(0,1) # Rescale the image between 0 and 1
             self._original_img = self.rgb_img
 
 
